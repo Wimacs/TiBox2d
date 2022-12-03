@@ -11,9 +11,9 @@ Yet another game-oriented GPU Physics Engine
 One or several game demo based on this project
 
 ## Todo List (Priority from highest to lowest):
-- [ ] rigid Body  
-- [ ] elastic & plastic bodies  
-- [ ] Neighborhood Search for collision handling
+- [x] rigid Body  
+- [x] elastic & plastic bodies  
+- [x] Neighborhood Search for collision handling
 - [ ] ropes  
-- [ ] fluid  
+- [x] fluid  
 - [ ] cloth
