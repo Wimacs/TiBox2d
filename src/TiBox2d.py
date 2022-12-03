@@ -14,11 +14,15 @@ class Collector:
     def __init__(self) -> None:
         self.rigid_box_list = []  
         self.water_box_list = []  
-        self.plastic_box_list = []  
+        self.plastic_box_list = []
+        self.elastic_box_list = []
+        self.ballon_list = []
         self.num_rigid = 0
         self.num_plastic = 0
         self.num_water = 0
+        self.num_elastic = 0
         self.num_particle = 0
+        self.num_ballon = 0
         self.h_ = 1.2
 
     def add_rigid_box(self, position_0_x, position_0_y, position_1_x, position_1_y):
@@ -32,8 +36,21 @@ class Collector:
         delta = self.h_ * 0.5
         num_particle_x = AABB_length_x // delta
         num_particle_y = AABB_length_y // delta
-        self.num_particle += num_particle_x * num_particle_y
+        self.num_particle += num_particle_x * num_particle_y - (num_particle_x - 2) * (num_particle_y - 2)
     
+    def add_elastic_box(self, position_0_x, position_0_y, position_1_x, position_1_y):
+        self.elastic_box_list.append(position_0_x)
+        self.elastic_box_list.append(position_0_y)
+        self.elastic_box_list.append(position_1_x)
+        self.elastic_box_list.append(position_1_y)
+        self.num_elastic += 1
+        AABB_length_x = position_1_x - position_0_x
+        AABB_length_y = position_1_y - position_0_y
+        delta = self.h_ * 0.5
+        num_particle_x = AABB_length_x // delta
+        num_particle_y = AABB_length_y // delta
+        self.num_particle += num_particle_x * num_particle_y
+
     def add_plastic_box(self, position_0_x, position_0_y, position_1_x, position_1_y):
         self.plastic_box_list.append(position_0_x)
         self.plastic_box_list.append(position_0_y)
@@ -59,10 +76,25 @@ class Collector:
         num_particle_x = AABB_length_x // delta
         num_particle_y = AABB_length_y // delta
         self.num_particle += num_particle_x * num_particle_y
+    
+    def add_ballon(self, position_0_x, position_0_y, position_1_x, position_1_y):
+        self.ballon_list.append(position_0_x)
+        self.ballon_list.append(position_0_y)
+        self.ballon_list.append(position_1_x)
+        self.ballon_list.append(position_1_y)
+        self.num_ballon += 1
+        AABB_length_x = position_1_x - position_0_x
+        AABB_length_y = position_1_y - position_0_y
+        delta = self.h_ * 0.5
+        num_particle_x = AABB_length_x // delta
+        num_particle_y = AABB_length_y // delta
+        self.num_particle += num_particle_x * num_particle_y
 
 @ti.data_oriented
 class Solver:
     def __init__(self, boundary, Collector : Collector):
+        self.Collector = Collector
+
         self.grid_size = (round_up(boundary[0], 1), round_up(boundary[1], 1))
 
         self.dim = 2
@@ -72,7 +104,7 @@ class Solver:
         self.max_num_particles_per_cell = 100
         self.max_num_neighbors = 100
         self.time_delta = 1.0 / 20.0
-        self.epsilon = 1e-2
+        self.epsilon = 1e-5
         self.particle_radius = 2
         self.particle_radius_in_world = self.particle_radius / self.screen_to_world_ratio
 
@@ -88,10 +120,14 @@ class Solver:
         self.poly6_factor = 315.0 / 64.0 / math.pi
         self.spiky_grad_factor = -45.0 / math.pi
 
+        self.boundary = boundary
+
 
         self.num_particles = int(Collector.num_particle)
         self.num_rigid = int(Collector.num_rigid)
         self.num_plastic = int(Collector.num_plastic)
+        self.num_elastic = int(Collector.num_elastic)
+        self.num_ballon = int(Collector.num_ballon)
         self.num_warter = int(Collector.num_water)
 
 
@@ -99,6 +135,7 @@ class Solver:
         self.positions = ti.Vector.field(self.dim, float)
         self.positions_rest = ti.Vector.field(self.dim, float)
         self.velocities = ti.Vector.field(self.dim, float)
+        self.material = ti.field(int)
         self.grid_num_particles = ti.field(int)
         self.grid2particles = ti.field(int)
         self.particle_num_neighbors = ti.field(int)
@@ -107,9 +144,8 @@ class Solver:
         self.position_deltas = ti.Vector.field(self.dim, float)
         # 0: x-pos, 1: timestep in sin()
         self.board_states = ti.Vector.field(2, float)
-        self.material = ti.field(dtype=int, shape=self.num_particles)
 
-        ti.root.dense(ti.i, self.num_particles).place(self.old_positions, self.positions, self.velocities, self.positions_rest)
+        ti.root.dense(ti.i, self.num_particles).place(self.old_positions, self.positions, self.velocities, self.positions_rest, self.material)
         grid_snode = ti.root.dense(ti.ij, self.grid_size)
         grid_snode.place(self.grid_num_particles)
         grid_snode.dense(ti.k, self.max_num_particles_per_cell).place(self.grid2particles)
@@ -132,6 +168,17 @@ class Solver:
             self.plastic_deform = ti.Matrix.field(self.dim, self.dim, float)
             ti.root.dense(ti.i, self.num_plastic).place(self.plastic_box_start, self.plastic_box_end, self.plastic_box_cm, self.plastic_deform)
 
+        if (self.num_elastic > 0):
+            self.elastic_box_start = ti.field(int)
+            self.elastic_box_end = ti.field(int)
+            self.elastic_box_region_count = ti.field(int)
+            ti.root.dense(ti.i, self.num_elastic).place(self.elastic_box_start, self.elastic_box_end, self.elastic_box_region_count)
+
+        if (self.num_ballon > 0):
+            self.ballon_start = ti.field(int)
+            self.ballon_end = ti.field(int)
+            ti.root.dense(ti.i, self.num_ballon).place(self.ballon_start, self.ballon_end)
+
         self.board_states[None] = ti.Vector([boundary[0] - self.epsilon, -0.0])
 
     # compute center of mass
@@ -144,9 +191,38 @@ class Solver:
             sum_m += self.mass
         cm /= sum_m
         return cm
+
+    @ti.func
+    def compute_cos_rest(self, x: int, y: int):
+        sum_m = 0.0
+        cm = ti.Vector([0.0, 0.0])
+        for i in range(x, y):
+            cm += self.mass * self.positions_rest[i]
+            sum_m += self.mass
+        cm /= sum_m
+        return cm
         
     @ti.kernel
-    def init_rigid_partical(self,rigid_index : int, start_index : int, AABB_bl_x : float, AABB_bl_y : float, AABB_tr_x : float, AABB_tr_y : float) -> int:
+    def init_water_particle(self, start_index : int, AABB_bl_x : float, AABB_bl_y : float, AABB_tr_x : float, AABB_tr_y : float) -> int:
+        delta = self.h_ * 0.5
+        cur_index = start_index
+        AABB_bl = ti.Vector([AABB_bl_x, AABB_bl_y])
+        AABB_tr = ti.Vector([AABB_tr_x, AABB_tr_y]) 
+        AABB_length_x = AABB_tr[0] - AABB_bl[0]
+        AABB_length_y = AABB_tr[1] - AABB_bl[1]
+        num_particle_x = int(AABB_length_x // delta)
+        num_particle_y = int(AABB_length_y // delta)
+
+        for i, j in ti.ndrange(num_particle_x, num_particle_y):
+            self.positions[cur_index] = ti.Vector([AABB_bl[0] + i * delta, AABB_bl[1] + j * delta])
+            self.positions_rest[cur_index] = ti.Vector([AABB_bl[0] + i* delta, AABB_bl[1] + j * delta])
+            cur_index += 1
+        
+
+        return cur_index
+
+    @ti.kernel
+    def init_rigid_particle(self,rigid_index : int, start_index : int, AABB_bl_x : float, AABB_bl_y : float, AABB_tr_x : float, AABB_tr_y : float) -> int:
         delta = self.h_ * 0.5
         cur_index = start_index
         AABB_bl = ti.Vector([AABB_bl_x, AABB_bl_y])
@@ -157,18 +233,20 @@ class Solver:
         num_particle_y = int(AABB_length_y // delta)
 
         self.rigid_box_start[rigid_index] = cur_index
-
+        ti.loop_config(serialize=True)
         for i, j in ti.ndrange(num_particle_x, num_particle_y):
-            self.positions[cur_index] = ti.Vector([AABB_bl[0] + i * delta, AABB_bl[1] + j * delta])
-            self.positions_rest[cur_index] = ti.Vector([AABB_bl[0] + i* delta, AABB_bl[1] + j * delta])
-            cur_index += 1
+            if (i==num_particle_x-1 or i==0 or j==num_particle_y-1 or j==0):
+                self.positions[cur_index] = ti.Vector([AABB_bl[0] + i * delta, AABB_bl[1] + j * delta])
+                self.positions_rest[cur_index] = ti.Vector([AABB_bl[0] + i* delta, AABB_bl[1] + j * delta])
+                self.material[cur_index] = 1
+                cur_index += 1
         
         self.rigid_box_end[rigid_index] = cur_index
         self.rigid_box_cm[rigid_index] =  self.compute_cos(self.rigid_box_start[rigid_index], self.rigid_box_end[rigid_index])
         return cur_index
 
     @ti.kernel
-    def init_plastic_partical(self,plastic_index : int, start_index : int, AABB_bl_x : float, AABB_bl_y : float, AABB_tr_x : float, AABB_tr_y : float) -> int:
+    def init_plastic_particle(self,plastic_index : int, start_index : int, AABB_bl_x : float, AABB_bl_y : float, AABB_tr_x : float, AABB_tr_y : float) -> int:
         delta = self.h_ * 0.5
         cur_index = start_index
         AABB_bl = ti.Vector([AABB_bl_x, AABB_bl_y])
@@ -179,15 +257,65 @@ class Solver:
         num_particle_y = int(AABB_length_y // delta)
 
         self.plastic_box_start[plastic_index] = cur_index
-
+        ti.loop_config(serialize=True)
         for i, j in ti.ndrange(num_particle_x, num_particle_y):
             self.positions[cur_index] = ti.Vector([AABB_bl[0] + i* delta, AABB_bl[1] + j * delta])
             self.positions_rest[cur_index] = ti.Vector([AABB_bl[0] + i* delta, AABB_bl[1] + j * delta])
+            self.material[cur_index] = 2
             cur_index += 1
         
         self.plastic_box_end[plastic_index] = cur_index
         self.plastic_box_cm[plastic_index] =  self.compute_cos(self.plastic_box_start[plastic_index], self.plastic_box_end[plastic_index])
         self.plastic_deform[plastic_index] = ti.Matrix([[1.0, 0.0], [0.0, 1.0]])
+        return cur_index
+
+    @ti.kernel
+    def init_elastic_particle(self,elastic_index : int,region : int, start_index : int, AABB_bl_x : float, AABB_bl_y : float, AABB_tr_x : float, AABB_tr_y : float) -> int:
+        delta = self.h_ * 0.5
+        cur_index = start_index
+        AABB_bl = ti.Vector([AABB_bl_x, AABB_bl_y])
+        AABB_tr = ti.Vector([AABB_tr_x, AABB_tr_y]) 
+        AABB_length_x = AABB_tr[0] - AABB_bl[0]
+        AABB_length_y = AABB_tr[1] - AABB_bl[1]
+        num_particle_x = int(AABB_length_x // delta)
+        num_particle_y = int(AABB_length_y // delta)
+
+        self.elastic_box_start[elastic_index] = cur_index
+        ti.loop_config(serialize=True)
+        #for i, j in ti.ndrange(num_particle_x, num_particle_y):
+        ti.loop_config(serialize=True)
+        for i in range(num_particle_x):
+            ti.loop_config(serialize=True)
+            for j in range(num_particle_y):
+                self.positions[cur_index] = ti.Vector([AABB_bl[0] + i* delta, AABB_bl[1] + j * delta])
+                self.positions_rest[cur_index] = ti.Vector([AABB_bl[0] + i* delta, AABB_bl[1] + j * delta])
+                self.material[cur_index] = 3
+                cur_index+=1
+        self.elastic_box_end[elastic_index] = cur_index
+        self.elastic_box_region_count[elastic_index] = region
+        return cur_index
+        
+    @ti.kernel
+    def init_ballon_particle(self,ballon_index : int, start_index : int, AABB_bl_x : float, AABB_bl_y : float, AABB_tr_x : float, AABB_tr_y : float) -> int:
+        delta = self.h_ * 0.5
+        cur_index = start_index
+        AABB_bl = ti.Vector([AABB_bl_x, AABB_bl_y])
+        AABB_tr = ti.Vector([AABB_tr_x, AABB_tr_y]) 
+        AABB_length_x = AABB_tr[0] - AABB_bl[0]
+        AABB_length_y = AABB_tr[1] - AABB_bl[1]
+        num_particle_x = int(AABB_length_x // delta)
+        num_particle_y = int(AABB_length_y // delta)
+
+        self.ballon_start[ballon_index] = cur_index
+        ti.loop_config(serialize=True)
+        for i, j in ti.ndrange(num_particle_x, num_particle_y):
+            if (i==num_particle_x-1 or i==0 or j==num_particle_y-1 or j==0):
+                self.positions[cur_index] = ti.Vector([AABB_bl[0] + i * delta, AABB_bl[1] + j * delta])
+                self.positions_rest[cur_index] = ti.Vector([AABB_bl[0] + i* delta, AABB_bl[1] + j * delta])
+                self.material[cur_index] = 1
+                cur_index += 1
+        
+        self.ballon_end[ballon_index] = cur_index
         return cur_index
 
     @ti.func
@@ -236,7 +364,7 @@ class Solver:
     @ti.func
     def confine_position_to_boundary(self, p):
         bmin = self.particle_radius_in_world
-        bmax = ti.Vector([self.board_states[None][0], boundary[1]
+        bmax = ti.Vector([self.board_states[None][0], self.boundary[1]
                         ]) - self.particle_radius_in_world
         for i in ti.static(range(self.dim)):
             # Use randomness to prevent particles from sticking into each other after clamping
@@ -249,7 +377,7 @@ class Solver:
     @ti.func
     def confine_velocity_to_boundary(self, p, v):
         bmin = self.particle_radius_in_world
-        bmax = ti.Vector([self.board_states[None][0], boundary[1]
+        bmax = ti.Vector([self.board_states[None][0], self.boundary[1]
                         ]) - self.particle_radius_in_world
         for i in ti.static(range(self.dim)):
             # Use randomness to prevent particles from sticking into each other after clamping
@@ -370,7 +498,7 @@ class Solver:
 
     @ti.kernel
     def shape_matching_rigid(self, num_rigid_body : int):
-        for rigid_index in range(2):
+        for rigid_index in range(num_rigid_body):
             start_index = self.rigid_box_start[rigid_index]
             end_index = self.rigid_box_end[rigid_index]
             rest_cm = self.rigid_box_cm[rigid_index]
@@ -386,10 +514,30 @@ class Solver:
                 goal = cm + R @ (self.positions_rest[idx] - rest_cm)
                 corr = (goal - self.positions[idx])
                 self.positions[idx] += corr
+
+    @ti.kernel
+    def shape_matching_elastic(self, num_elastic_body : int):
+        for elastic_index in range(num_elastic_body):
+            start_index = self.elastic_box_start[elastic_index]
+            end_index = self.elastic_box_end[elastic_index]
+            region_count = self.elastic_box_region_count[elastic_index]
+            for region_index in range(start_index, end_index - region_count + 1):
+                cm = self.compute_cos(region_index, region_index + region_count)
+                rest_cm = self.compute_cos_rest(region_index, region_index + region_count)
+                A = ti.Matrix([[0.0, 0.0], [0.0, 0.0]])
+                for idx in range(region_index, region_index + region_count):
+                    q = self.positions_rest[idx] - rest_cm
+                    p = self.positions[idx] - cm
+                    A += p @ q.transpose()
+                R, S = ti.polar_decompose(A)
+                for idx in range(region_index, region_index + region_count):
+                    goal = cm + R @ (self.positions_rest[idx] - rest_cm)
+                    corr = (goal - self.positions[idx])
+                    self.positions[idx] += corr
     
     @ti.kernel
     def shape_matching_plastic(self, num_plastic_body : int):
-        for plastic_index in range(2):
+        for plastic_index in range(num_plastic_body):
             I = ti.Matrix([[1.0, 0.0], [0.0, 1.0]])
             start_index = self.plastic_box_start[plastic_index]
             end_index = self.plastic_box_end[plastic_index]
@@ -403,51 +551,82 @@ class Solver:
                 p = self.positions[idx] - cm
                 A += p @ q.transpose()
             R, S = ti.polar_decompose(A)
-            SP = (I + 0.001 * (S - I)) @ SP
+            S = S/(end_index - start_index)
+            SP = (I + self.time_delta * (S - I)) @ SP
+            SP /= pow(SP.determinant(), 1/3)
+            print(S-I)
             self.plastic_deform[plastic_index] = SP
             for idx in range(start_index, end_index):
                 goal = cm + R @ (self.positions_rest[idx] - rest_cm)
                 corr = (goal - self.positions[idx])
                 self.positions[idx] += corr
-
-screen_res = (800, 800)
-screen_to_world_ratio = 20
-boundary = (screen_res[0] / screen_to_world_ratio,
-            screen_res[1] / screen_to_world_ratio)
-fuck = Collector()
-fuck.add_rigid_box(5.0, 10.0, 8.0, 13.0)
-fuck.add_rigid_box(5.0, 5.0, 8.0, 8.0)
-fuck.add_plastic_box(20.0, 20.0, 24.0, 24.0)
-shit = Solver(boundary, fuck)
-
-particle_index = 0
-for rigid_index in range(fuck.num_rigid):
-    particle_index = shit.init_rigid_partical(rigid_index, particle_index, fuck.rigid_box_list[rigid_index * 4 + 0], fuck.rigid_box_list[rigid_index * 4 + 1]
-        , fuck.rigid_box_list[rigid_index * 4 + 2], fuck.rigid_box_list[rigid_index * 4 + 3])
-for plastic_index in range(fuck.num_plastic):
-    particle_index = shit.init_plastic_partical(plastic_index, particle_index, fuck.plastic_box_list[plastic_index * 4 + 0], fuck.plastic_box_list[plastic_index * 4 + 1]
-        , fuck.plastic_box_list[plastic_index * 4 + 2], fuck.plastic_box_list[plastic_index * 4 + 3])
     
-gui = ti.GUI('PBD',screen_res)
+    @ti.kernel
+    def shape_matching_plastic_fake(self, num_plastic_body : int):
+        for plastic_index in range(num_plastic_body):
+            I = ti.Matrix([[1.0, 0.0], [0.0, 1.0]])
+            start_index = self.plastic_box_start[plastic_index]
+            end_index = self.plastic_box_end[plastic_index]
+            rest_cm = self.plastic_box_cm[plastic_index]
+            cm = self.compute_cos(start_index, end_index)
+            # A
+            A = ti.Matrix([[0.0, 0.0], [0.0, 0.0]])
+            for idx in range(start_index, end_index):
+                q = self.positions_rest[idx] - rest_cm
+                p = self.positions[idx] - cm
+                A += p @ q.transpose()
+            R, S = ti.polar_decompose(A)
+            for idx in range(start_index, end_index):
+                goal = cm + R @ (self.positions_rest[idx] - rest_cm)
+                corr = (goal - self.positions[idx])
+                self.positions[idx] += corr
 
-while True:
+    # @ti.kernel
+    # def solve_ballon(self, num_ballon : int):
+    #     for ballon_index in range(num_ballon):
+    #         start_index = self.plastic_box_start[ballon_index]
+    #         end_index = self.plastic_box_end[ballon_index]
+    #         cm = self.compute_cos(start_index, end_index)
+    #         for idx in range(start_index, end_index):
+    #             q = self.positions_rest[idx] - rest_cm
+    #             p = self.positions[idx] - cm
+    #             A += p @ q.transpose()
+    #         R, S = ti.polar_decompose(A)
+    #         for idx in range(start_index, end_index):
+    #             goal = cm + R @ (self.positions_rest[idx] - rest_cm)
+    #             corr = (goal - self.positions[idx])
+    #             self.positions[idx] += corr
 
-    shit.nearest_neigbour()
-    #for _ in range(shit.pbf_num_iters):
-    if (fuck.num_rigid > 0):
-        shit.shape_matching_rigid(fuck.num_rigid)
-    if (fuck.num_plastic > 0):
-        shit.shape_matching_plastic(fuck.num_plastic)
-    for _ in range(shit.pbf_num_iters):
-        shit.substep()
-    shit.apply_boundary()
+    def Compile(self, collector : Collector):
+        particle_index = 0
+        for rigid_index in range(self.Collector.num_rigid):
+            particle_index = self.init_rigid_particle(rigid_index, particle_index, self.Collector.rigid_box_list[rigid_index * 4 + 0], collector.rigid_box_list[rigid_index * 4 + 1]
+                , self.Collector.rigid_box_list[rigid_index * 4 + 2], self.Collector.rigid_box_list[rigid_index * 4 + 3])
+        for plastic_index in range(collector.num_plastic):
+            particle_index = self.init_plastic_particle(plastic_index, particle_index, self.Collector.plastic_box_list[plastic_index * 4 + 0], collector.plastic_box_list[plastic_index * 4 + 1]
+                , self.Collector.plastic_box_list[plastic_index * 4 + 2], self.Collector.plastic_box_list[plastic_index * 4 + 3])
+        for elastic_index in range(self.Collector.num_elastic):
+            particle_index = self.init_elastic_particle(elastic_index, 38, particle_index, self.Collector.elastic_box_list[elastic_index * 4 + 0], collector.elastic_box_list[elastic_index * 4 + 1]
+                , self.Collector.elastic_box_list[elastic_index * 4 + 2], self.Collector.elastic_box_list[elastic_index * 4 + 3])
+        for ballon_index in range(self.Collector.num_ballon):
+            particle_index = self.init_ballon_particle(ballon_index, particle_index, self.Collector.ballon_list[ballon_index * 4 + 0], collector.ballon_list[ballon_index * 4 + 1]
+                , self.Collector.ballon_list[ballon_index * 4 + 2], self.Collector.ballon_list[ballon_index * 4 + 3])
+        for water_index in range(self.Collector.num_water):
+            particle_index = self.init_water_particle(particle_index, self.Collector.water_box_list[water_index * 4 + 0], collector.water_box_list[water_index * 4 + 1]
+                , self.Collector.water_box_list[water_index * 4 + 2], self.Collector.water_box_list[water_index * 4 + 3])
 
-    pos_np = shit.positions.to_numpy()
-    for j in range(2):
-        pos_np[:, j] *= screen_to_world_ratio / screen_res[j]
-    #print(pos_np)
-    gui.circles(pos_np,
-                radius=2,
-                color=0x168587)
-    # Change to gui.show(f'{frame:06d}.png') to write images to disk
-    gui.show()
+    def step(self, collector : Collector):
+        if (self.num_plastic > 0):
+            self.shape_matching_plastic_fake(collector.num_plastic)
+        self.nearest_neigbour()
+        #for _ in range(self.pbf_num_iters):
+        if (self.num_rigid > 0):
+            self.shape_matching_rigid(collector.num_rigid)
+        # if (fuck.num_plastic > 0):
+        #     self.shape_matching_plastic(fuck.num_plastic)
+        if (self.num_elastic > 0):
+            self.shape_matching_elastic(collector.num_elastic)
+        for _ in range(self.pbf_num_iters):
+            self.substep()
+        self.apply_boundary()
+
