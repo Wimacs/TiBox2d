@@ -17,12 +17,14 @@ class Collector:
         self.plastic_box_list = []
         self.elastic_box_list = []
         self.ballon_list = []
+        self.rope_list = []
         self.num_rigid = 0
         self.num_plastic = 0
         self.num_water = 0
         self.num_elastic = 0
         self.num_particle = 0
         self.num_ballon = 0
+        self.num_rope = 0
         self.h_ = 1.2
 
     def add_rigid_box(self, position_0_x, position_0_y, position_1_x, position_1_y):
@@ -76,6 +78,16 @@ class Collector:
         num_particle_x = AABB_length_x // delta
         num_particle_y = AABB_length_y // delta
         self.num_particle += num_particle_x * num_particle_y
+
+    def add_rope(self, position_x, position_0_y, position_1_y):
+        self.rope_list.append(position_x)
+        self.rope_list.append(position_0_y)
+        self.rope_list.append(position_1_y)
+        self.num_rope += 1
+        AABB_length_y = position_1_y - position_0_y
+        delta = self.h_ * 0.5
+        num_particle_y = AABB_length_y // delta
+        self.num_particle += num_particle_y
     
     def add_ballon(self, position_0_x, position_0_y, position_1_x, position_1_y):
         self.ballon_list.append(position_0_x)
@@ -113,7 +125,7 @@ class Solver:
         self.mass = 1.0
         self.rho0 = 1.0
         self.lambda_epsilon = 100.0
-        self.pbf_num_iters = 5
+        self.pbf_num_iters = 20
         self.corr_deltaQ_coeff = 0.2
         self.corrK = 0.001
         self.neighbor_radius = self.h_ * 1.0
@@ -129,6 +141,7 @@ class Solver:
         self.num_elastic = int(Collector.num_elastic)
         self.num_ballon = int(Collector.num_ballon)
         self.num_warter = int(Collector.num_water)
+        self.num_rope = int(Collector.num_rope)
 
 
         self.old_positions = ti.Vector.field(self.dim, float)
@@ -178,6 +191,11 @@ class Solver:
             self.ballon_start = ti.field(int)
             self.ballon_end = ti.field(int)
             ti.root.dense(ti.i, self.num_ballon).place(self.ballon_start, self.ballon_end)
+        
+        if (self.num_rope > 0):
+            self.rope_start = ti.field(int)
+            self.rope_end = ti.field(int)
+            ti.root.dense(ti.i, self.num_rope).place(self.rope_start, self.rope_end)
 
         self.board_states[None] = ti.Vector([boundary[0] - self.epsilon, -0.0])
 
@@ -212,7 +230,7 @@ class Solver:
         AABB_length_y = AABB_tr[1] - AABB_bl[1]
         num_particle_x = int(AABB_length_x // delta)
         num_particle_y = int(AABB_length_y // delta)
-
+        ti.loop_config(serialize=True)
         for i, j in ti.ndrange(num_particle_x, num_particle_y):
             self.positions[cur_index] = ti.Vector([AABB_bl[0] + i * delta, AABB_bl[1] + j * delta])
             self.positions_rest[cur_index] = ti.Vector([AABB_bl[0] + i* delta, AABB_bl[1] + j * delta])
@@ -220,6 +238,12 @@ class Solver:
         
 
         return cur_index
+
+    @ti.kernel
+    def noise_vel(self):
+        for i in range(self.num_particles):
+            for c in ti.static(range(self.dim)):
+                self.velocities[i][c] = (ti.random() - 0.5) * 4
 
     @ti.kernel
     def init_rigid_particle(self,rigid_index : int, start_index : int, AABB_bl_x : float, AABB_bl_y : float, AABB_tr_x : float, AABB_tr_y : float) -> int:
@@ -316,6 +340,26 @@ class Solver:
                 cur_index += 1
         
         self.ballon_end[ballon_index] = cur_index
+        return cur_index
+
+    @ti.kernel
+    def init_rope_particle(self,rope_index : int, start_index : int, AABB_x : float, AABB_0y : float, AABB_tr_1y : float) -> int:
+        delta = self.h_ * 0.5
+        cur_index = start_index
+        buttom = ti.Vector([AABB_x, AABB_0y])
+        top = ti.Vector([AABB_x, AABB_tr_1y]) 
+        length_y = AABB_tr_1y - AABB_0y
+        num_particle_y = int(length_y // delta)
+
+        self.rope_start[rope_index] = cur_index
+        ti.loop_config(serialize=True)
+        for j in range(num_particle_y):
+            self.positions[cur_index] = ti.Vector([top[0], top[1] - j * delta])
+            self.positions_rest[cur_index] = ti.Vector([top[0], top[1] - j * delta])
+            self.material[cur_index] = 4
+            cur_index += 1
+        
+        self.rope_end[rope_index] = cur_index
         return cur_index
 
     @ti.func
@@ -581,6 +625,42 @@ class Solver:
                 corr = (goal - self.positions[idx])
                 self.positions[idx] += corr
 
+    @ti.kernel
+    def follow_the_leader(self, num_rope : int):
+        for rope_index in range(num_rope):
+            start_index = self.rope_start[rope_index]
+            end_index = self.rope_end[rope_index]
+            #ti.loop_config(serialize=True)
+            for node_index in range(start_index + 1, end_index):
+                rest_dist_vec = self.positions_rest[node_index - 1] - self.positions_rest[node_index]
+                dist_vec = self.positions[node_index - 1] - self.positions[node_index]
+                #print(dist_vec)
+                cur_delta = dist_vec[0]*dist_vec[0] + dist_vec[1]*dist_vec[1]
+                cur_delta = pow(cur_delta, 1/2)
+                rest_delta = rest_dist_vec[0]*rest_dist_vec[0] + rest_dist_vec[1]*rest_dist_vec[1]
+                rest_delta = self.h_ * 0.5
+                #if (cur_delta - rest_delta) < 0:
+                self.positions[node_index] += (cur_delta - rest_delta) * (dist_vec/cur_delta) * 0.01
+                
+    @ti.kernel
+    def rope_shape_matching(self, num_rope : int):
+        for rope_index in range(num_rope):
+            start_index = self.rope_start[rope_index]
+            end_index = self.rope_end[rope_index]
+            for region_index in range(start_index, end_index - 2 + 1):
+                cm = self.compute_cos(region_index, region_index + 2)
+                rest_cm = self.compute_cos_rest(region_index, region_index + 2)
+                A = ti.Matrix([[0.0, 0.0], [0.0, 0.0]])
+                for idx in range(region_index, region_index + 2):
+                    q = self.positions_rest[idx] - rest_cm
+                    p = self.positions[idx] - cm
+                    A += p @ q.transpose()
+                R, S = ti.polar_decompose(A)
+                for idx in range(region_index, region_index + 2):
+                    goal = cm + R @ (self.positions_rest[idx] - rest_cm)
+                    corr = (goal - self.positions[idx])
+                    self.positions[idx] += corr
+                
     # @ti.kernel
     # def solve_ballon(self, num_ballon : int):
     #     for ballon_index in range(num_ballon):
@@ -611,9 +691,14 @@ class Solver:
         for ballon_index in range(self.Collector.num_ballon):
             particle_index = self.init_ballon_particle(ballon_index, particle_index, self.Collector.ballon_list[ballon_index * 4 + 0], collector.ballon_list[ballon_index * 4 + 1]
                 , self.Collector.ballon_list[ballon_index * 4 + 2], self.Collector.ballon_list[ballon_index * 4 + 3])
+        for rope_index in range(self.Collector.num_rope):
+            particle_index = self.init_rope_particle(rope_index, particle_index, self.Collector.rope_list[rope_index * 3 + 0], collector.rope_list[rope_index * 3 + 1]
+                , self.Collector.rope_list[rope_index * 3 + 2])
         for water_index in range(self.Collector.num_water):
             particle_index = self.init_water_particle(particle_index, self.Collector.water_box_list[water_index * 4 + 0], collector.water_box_list[water_index * 4 + 1]
                 , self.Collector.water_box_list[water_index * 4 + 2], self.Collector.water_box_list[water_index * 4 + 3])
+        self.noise_vel()
+
 
     def step(self, collector : Collector):
         if (self.num_plastic > 0):
@@ -626,7 +711,11 @@ class Solver:
         #     self.shape_matching_plastic(fuck.num_plastic)
         if (self.num_elastic > 0):
             self.shape_matching_elastic(collector.num_elastic)
+        if (self.num_rope > 0):
+            self.rope_shape_matching(collector.num_rope)
         for _ in range(self.pbf_num_iters):
             self.substep()
+            # if (self.num_rope > 0):
+            #     self.follow_the_leader(collector.num_rope)
         self.apply_boundary()
 
