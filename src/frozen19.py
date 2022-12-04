@@ -13,9 +13,7 @@ tibox_solver = TiBox2d.Solver((screen_res[0] / screen_to_world_ratio,screen_res[
 tibox_solver.Compile(tibox_collector)
 gui = ti.GUI('PBD',screen_res)
 
-for i in range(1000):
+while True:
     tibox_solver.step(tibox_collector)
     gui.circles(tibox_solver.positions.to_numpy() * screen_to_world_ratio / screen_res[0],radius=2,palette=[ 0x068587,0xADFF2F, 0xED553B, 0xEEEEF0, 0xEE82EE],palette_indices= tibox_solver.material)
-    filename = f'frame_{i:05d}.png'   # create filename with suffix png
-    print(f'Frame {i} is recorded in {filename}')
-    gui.show(filename)  # export and show in GUI
+    gui.show()
