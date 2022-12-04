@@ -16,7 +16,7 @@ Yet another game-oriented GPU Physics Engine
 import TiBox2d
 import taichi as ti
 ```
-创建物Tibox2d理收集器
+创建Tibox2d物理收集器
 ``` python
 tibox_collector = TiBox2d.Collector()
 ```
