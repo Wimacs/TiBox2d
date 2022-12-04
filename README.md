@@ -45,6 +45,7 @@ tibox_solver.step(tibox_collector)
 cd src
 python3 frozen19.py
 ```
+![](/pic/video.gif "Frozen19s")
 
 ### Demo2(Incomplete): AngryTi中文：愤怒的小鸟太极版)
 ```python
