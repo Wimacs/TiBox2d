@@ -4,10 +4,18 @@ Yet another game-oriented GPU Physics Engine
 
 ## Motivation: 
 1. Fulfill a wish from 2 years ago when I first learned Taichi and GAMES201
+完成一个鸽了许久的承诺
 2. Most developers who want to write a physics simulation game with Taichi can't help but use "MPM99" as a template and modify it, so it's time to bring some diversity.
+写游戏竟然不用PBD？
 3. for fun
+确实很好玩
 
-## API
+## API与使用方法
+故事开始
+``` python
+import TiBox2d
+import taichi as ti
+```
 创建物Tibox2d理收集器
 ``` python
 tibox_collector = TiBox2d.Collector()
@@ -30,7 +38,7 @@ tibox_solver.Compile(tibox_collector)
 tibox_solver = TiBox2d.Solver(...)
 tibox_solver.step(tibox_collector)
 ```
-这是位置就会在```tibox_solver.positions```得到更新
+这时位置就会在```tibox_solver.positions```中得到更新
 
 ### Demo1: Frozen19 (中文：19行代码的《冰雪奇缘》)
 ```python
